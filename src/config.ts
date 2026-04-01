@@ -1,5 +1,5 @@
-import { readFileSync } from 'fs'
-import { parse } from 'yaml'
+import { readFileSync, writeFileSync } from 'fs'
+import { parse, stringify } from 'yaml'
 import { resolve } from 'path'
 
 export type TokenEntry = {
@@ -64,4 +64,22 @@ export function loadConfig(configPath?: string): Config {
   }
 
   return config
+}
+
+let configFilePath: string | undefined
+
+export function setConfigPath(path: string) {
+  configFilePath = path
+}
+
+/**
+ * Persist a rotated refresh token back to config.yaml so it survives restarts.
+ */
+export function persistRefreshToken(newToken: string) {
+  const filePath = configFilePath || resolve(process.cwd(), 'config.yaml')
+  const raw = readFileSync(filePath, 'utf-8')
+  const config = parse(raw) as Config
+  if (config.oauth.refresh_token === newToken) return // no change
+  config.oauth.refresh_token = newToken
+  writeFileSync(filePath, stringify(config), 'utf-8')
 }

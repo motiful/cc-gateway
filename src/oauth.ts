@@ -1,5 +1,6 @@
 import { request as httpsRequest } from 'https'
 import { log } from './logger.js'
+import { persistRefreshToken } from './config.js'
 
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
@@ -97,9 +98,18 @@ function refreshOAuthToken(refreshToken: string): Promise<OAuthTokens> {
             reject(new Error(`OAuth refresh failed (${res.statusCode}): ${JSON.stringify(data)}`))
             return
           }
+          const newRefreshToken = data.refresh_token || refreshToken
+          if (data.refresh_token && data.refresh_token !== refreshToken) {
+            log('info', 'Refresh token rotated, persisting to config...')
+            try {
+              persistRefreshToken(data.refresh_token)
+            } catch (err) {
+              log('error', `Failed to persist rotated refresh token: ${err}`)
+            }
+          }
           resolve({
             accessToken: data.access_token,
-            refreshToken: data.refresh_token || refreshToken,
+            refreshToken: newRefreshToken,
             expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
           })
         })
