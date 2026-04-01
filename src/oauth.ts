@@ -1,4 +1,6 @@
 import { request as httpsRequest } from 'https'
+import { readFileSync, writeFileSync } from 'fs'
+import { resolve } from 'path'
 import { log } from './logger.js'
 
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
@@ -18,19 +20,40 @@ type OAuthTokens = {
 }
 
 let cachedTokens: OAuthTokens | null = null
+let configPath: string = resolve(process.cwd(), 'config.yaml')
+
+function persistRefreshToken(newToken: string) {
+  try {
+    const raw = readFileSync(configPath, 'utf-8')
+    const updated = raw.replace(
+      /refresh_token:\s*["'].*?["']/,
+      `refresh_token: "${newToken}"`
+    )
+    writeFileSync(configPath, updated, 'utf-8')
+    log('info', 'Persisted new refresh_token to config.yaml')
+  } catch (err) {
+    log('warn', `Failed to persist refresh_token: ${err}`)
+  }
+}
 
 /**
  * Initialize OAuth with a refresh token.
  * The gateway holds the refresh token and manages access token lifecycle.
  * Client machines never need to contact platform.claude.com.
  */
-export async function initOAuth(refreshToken: string): Promise<void> {
+export async function initOAuth(refreshToken: string, cfgPath?: string): Promise<void> {
+  if (cfgPath) configPath = cfgPath
   log('info', 'Refreshing OAuth token...')
   cachedTokens = await refreshOAuthToken(refreshToken)
   log('info', `OAuth token acquired, expires at ${new Date(cachedTokens.expiresAt).toISOString()}`)
 
+  // Persist rotated refresh token
+  if (cachedTokens.refreshToken !== refreshToken) {
+    persistRefreshToken(cachedTokens.refreshToken)
+  }
+
   // Auto-refresh 5 minutes before expiry
-  scheduleRefresh(refreshToken)
+  scheduleRefresh(cachedTokens.refreshToken)
 }
 
 function scheduleRefresh(refreshToken: string) {
@@ -42,11 +65,16 @@ function scheduleRefresh(refreshToken: string) {
   setTimeout(async () => {
     try {
       log('info', 'Auto-refreshing OAuth token...')
-      cachedTokens = await refreshOAuthToken(
-        cachedTokens?.refreshToken || refreshToken,
-      )
+      const prevToken = cachedTokens?.refreshToken || refreshToken
+      cachedTokens = await refreshOAuthToken(prevToken)
       log('info', `OAuth token refreshed, expires at ${new Date(cachedTokens.expiresAt).toISOString()}`)
-      scheduleRefresh(cachedTokens.refreshToken || refreshToken)
+
+      // Persist rotated refresh token
+      if (cachedTokens.refreshToken !== prevToken) {
+        persistRefreshToken(cachedTokens.refreshToken)
+      }
+
+      scheduleRefresh(cachedTokens.refreshToken)
     } catch (err) {
       log('error', `OAuth refresh failed: ${err}. Retrying in 30s...`)
       setTimeout(() => scheduleRefresh(refreshToken), 30_000)
