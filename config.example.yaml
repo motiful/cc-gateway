@@ -12,6 +12,7 @@ server:
 # Upstream Anthropic API
 upstream:
   url: https://api.anthropic.com
+  # proxy: "http://user:pass@host:port"  # Optional: upstream proxy for API requests
 
 # OAuth - gateway manages token lifecycle centrally
 # Step 1: On admin machine, run `claude` and do browser OAuth login

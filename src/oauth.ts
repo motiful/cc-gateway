@@ -1,4 +1,5 @@
 import { request as httpsRequest } from 'https'
+import { HttpsProxyAgent } from 'https-proxy-agent'
 import { log } from './logger.js'
 
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
@@ -24,7 +25,10 @@ let cachedTokens: OAuthTokens | null = null
  * The gateway holds the refresh token and manages access token lifecycle.
  * Client machines never need to contact platform.claude.com.
  */
-export async function initOAuth(refreshToken: string): Promise<void> {
+let proxyAgent: HttpsProxyAgent<string> | undefined
+
+export async function initOAuth(refreshToken: string, proxyUrl?: string): Promise<void> {
+  if (proxyUrl) proxyAgent = new HttpsProxyAgent(proxyUrl)
   log('info', 'Refreshing OAuth token...')
   cachedTokens = await refreshOAuthToken(refreshToken)
   log('info', `OAuth token acquired, expires at ${new Date(cachedTokens.expiresAt).toISOString()}`)
@@ -87,6 +91,7 @@ function refreshOAuthToken(refreshToken: string): Promise<OAuthTokens> {
           'Content-Type': 'application/json',
           'Content-Length': String(Buffer.byteLength(body)),
         },
+        ...(proxyAgent ? { agent: proxyAgent } : {}),
       },
       (res) => {
         const chunks: Buffer[] = []

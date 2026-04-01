@@ -3,6 +3,7 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { readFileSync } from 'fs'
 import { request as httpsRequest } from 'https'
 import { URL } from 'url'
+import { HttpsProxyAgent } from 'https-proxy-agent'
 import type { Config } from './config.js'
 import { authenticate, initAuth } from './auth.js'
 import { getAccessToken } from './oauth.js'
@@ -13,10 +14,12 @@ export function startProxy(config: Config) {
   initAuth(config)
 
   const upstream = new URL(config.upstream.url)
+  const proxyAgent = config.upstream.proxy ? new HttpsProxyAgent(config.upstream.proxy) : undefined
+  if (proxyAgent) log('info', `Using upstream proxy: ${config.upstream.proxy!.replace(/:([^:@]+)@/, ':***@')}`)
   const useTls = config.server.tls?.cert && config.server.tls?.key
 
   const handler = (req: IncomingMessage, res: ServerResponse) => {
-    handleRequest(req, res, config, upstream)
+    handleRequest(req, res, config, upstream, proxyAgent)
   }
 
   let server
@@ -46,6 +49,7 @@ async function handleRequest(
   res: ServerResponse,
   config: Config,
   upstream: URL,
+  proxyAgent?: HttpsProxyAgent<string>,
 ) {
   const method = req.method || 'GET'
   const path = req.url || '/'
@@ -135,6 +139,7 @@ async function handleRequest(
         host: upstream.host,
         'content-length': String(body.length),
       },
+      ...(proxyAgent ? { agent: proxyAgent } : {}),
     },
     (proxyRes) => {
       const status = proxyRes.statusCode || 502

@@ -17,6 +17,7 @@ export type Config = {
   }
   upstream: {
     url: string
+    proxy?: string  // e.g. http://user:pass@host:port
   }
   auth: {
     tokens: TokenEntry[]

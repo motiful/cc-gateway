@@ -12,7 +12,7 @@ try {
   log('info', 'CC Gateway starting...')
 
   // Initialize OAuth first - gateway manages the token lifecycle
-  await initOAuth(config.oauth.refresh_token)
+  await initOAuth(config.oauth.refresh_token, config.upstream.proxy)
 
   startProxy(config)
 } catch (err) {
