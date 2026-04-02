@@ -194,7 +194,7 @@ function buildVerificationPayload(config: Config) {
     system: [
       {
         type: 'text',
-        text: `x-anthropic-billing-header: cc_version=2.1.81.a1b; cc_entrypoint=cli;`,
+        text: `x-anthropic-billing-header: cc_version=${config.env.version}.a1b; cc_entrypoint=cli;`,
       },
       {
         type: 'text',

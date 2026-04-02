@@ -17,6 +17,7 @@ export type Config = {
   }
   upstream: {
     url: string
+    proxy?: string
   }
   auth: {
     tokens: TokenEntry[]

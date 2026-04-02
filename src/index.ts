@@ -1,6 +1,7 @@
 import { loadConfig } from './config.js'
 import { setLogLevel, log } from './logger.js'
 import { initOAuth } from './oauth.js'
+import { initVersion } from './version.js'
 import { startProxy } from './proxy.js'
 
 const configPath = process.argv[2]
@@ -13,6 +14,9 @@ try {
 
   // Initialize OAuth — uses existing access token if valid, only refreshes when expired
   await initOAuth(config.oauth)
+
+  // Sync version from npm registry (+ hourly auto-refresh)
+  await initVersion(config)
 
   startProxy(config)
 } catch (err) {
