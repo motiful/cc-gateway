@@ -1,5 +1,37 @@
+import { createHash, randomBytes } from 'crypto'
 import type { Config } from './config.js'
 import { log } from './logger.js'
+
+// ── CCH hash algorithm (reverse-engineered from cli.js) ──
+const CCH_SALT = '59cf53e54c78'
+const CCH_POSITIONS = [4, 7, 20]
+
+// Fallback for non-message requests where no user message exists
+const FALLBACK_HASH = randomBytes(2).toString('hex').slice(0, 3)
+
+function computeCCH(firstUserMessageText: string, version: string): string {
+  const chars = CCH_POSITIONS.map(i => firstUserMessageText[i] || '0').join('')
+  return createHash('sha256')
+    .update(`${CCH_SALT}${chars}${version}`)
+    .digest('hex')
+    .slice(0, 3)
+}
+
+/**
+ * Extract first user message text from API request messages array.
+ * API format uses role: "user", content can be string or array of blocks.
+ */
+function extractFirstUserMessage(messages: any[]): string {
+  if (!Array.isArray(messages)) return ''
+  const firstUser = messages.find((m: any) => m.role === 'user')
+  if (!firstUser) return ''
+  if (typeof firstUser.content === 'string') return firstUser.content
+  if (Array.isArray(firstUser.content)) {
+    const textBlock = firstUser.content.find((b: any) => b.type === 'text')
+    if (textBlock?.text) return textBlock.text
+  }
+  return ''
+}
 
 /**
  * Rewrite identity fields in the API request body.
@@ -24,8 +56,6 @@ export function rewriteBody(body: Buffer, path: string, config: Config): Buffer 
   } else if (path.includes('/event_logging/batch')) {
     rewriteEventBatch(parsed, config)
   } else if (path.includes('/policy_limits') || path.includes('/settings')) {
-    // These are GET-like requests, usually no body to rewrite
-    // But if they do have a body, rewrite identity fields
     rewriteGenericIdentity(parsed, config)
   }
 
@@ -34,7 +64,12 @@ export function rewriteBody(body: Buffer, path: string, config: Config): Buffer 
 
 /**
  * Rewrite /v1/messages request body.
- * Key field: metadata.user_id (JSON-stringified object with device_id, account_uuid, session_id)
+ *
+ * Order matters:
+ * 1. Rewrite user message content (paths, etc.) FIRST
+ * 2. Extract first user message from REWRITTEN content
+ * 3. Compute hash from rewritten message (so it matches what server sees)
+ * 4. Rewrite system prompt billing header using computed hash
  */
 function rewriteMessagesBody(body: any, config: Config) {
   // Rewrite metadata.user_id
@@ -49,61 +84,84 @@ function rewriteMessagesBody(body: any, config: Config) {
     }
   }
 
-  // Rewrite system prompt: billing header + environment block
-  if (Array.isArray(body.system)) {
-    for (let i = 0; i < body.system.length; i++) {
-      const item = body.system[i]
-      if (typeof item === 'string') {
-        body.system[i] = rewritePromptText(item, config)
-      } else if (item?.text) {
-        item.text = rewritePromptText(item.text, config)
-      }
-    }
-  } else if (typeof body.system === 'string') {
-    body.system = rewritePromptText(body.system, config)
-  }
-
-  // Rewrite user messages that may contain <system-reminder> with env info
+  // Step 1: Rewrite <system-reminder> blocks in messages (injected by CC, not user content).
+  // We do NOT rewrite general user message text — that would corrupt user intent.
   if (Array.isArray(body.messages)) {
     for (const msg of body.messages) {
       if (typeof msg.content === 'string') {
-        msg.content = rewritePromptText(msg.content, config)
+        msg.content = rewriteSystemReminders(msg.content, config)
       } else if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
           if (block?.text) {
-            block.text = rewritePromptText(block.text, config)
+            block.text = rewriteSystemReminders(block.text, config)
           }
         }
       }
     }
   }
+
+  // Step 2: Extract first user message from content (after system-reminder rewrite)
+  const firstUserText = extractFirstUserMessage(body.messages)
+
+  // Step 3: Compute hash from rewritten message + canonical version
+  const version = String(config.env.version)
+  const hash = firstUserText ? computeCCH(firstUserText, version) : FALLBACK_HASH
+  log('debug', `Computed CCH: ${hash} (from ${firstUserText.length} char message)`)
+
+  // Step 4: Strip billing header block from system prompt (cache optimization).
+  // If client set CLAUDE_CODE_ATTRIBUTION_HEADER=false, the block won't exist.
+  // This is the gateway-side safety net for clients that didn't set it.
+  if (Array.isArray(body.system)) {
+    // Remove system blocks that are purely the billing header
+    body.system = body.system.filter((item: any) => {
+      const text = typeof item === 'string' ? item : item?.text
+      if (typeof text === 'string' && /^\s*x-anthropic-billing-header:/.test(text)) {
+        log('debug', 'Stripped billing header block from system prompt')
+        return false
+      }
+      return true
+    })
+
+    // Rewrite remaining system blocks (env, paths, etc.)
+    for (let i = 0; i < body.system.length; i++) {
+      const item = body.system[i]
+      if (typeof item === 'string') {
+        body.system[i] = rewritePromptText(item, config, hash)
+      } else if (item?.text) {
+        item.text = rewritePromptText(item.text, config, hash)
+      }
+    }
+  } else if (typeof body.system === 'string') {
+    // Strip inline billing header if embedded in a single string
+    body.system = body.system.replace(/x-anthropic-billing-header:[^\n]+\n?/g, '')
+    body.system = rewritePromptText(body.system, config, hash)
+  }
 }
 
 /**
  * Comprehensive text rewriter for system prompt and user messages.
- * Rewrites:
- * 1. Billing header (cc_version fingerprint)
- * 2. <env> block (Platform, Shell, OS Version, Working directory)
- * 3. Inline environment references (Primary working directory, etc.)
- * 4. Home directory paths that leak username
+ *
+ * When hash is provided, rewrites the billing header hash.
+ * When hash is null, only rewrites env/path fields (used for messages before hash computation).
  */
-function rewritePromptText(text: string, config: Config): string {
+function rewritePromptText(text: string, config: Config, hash: string | null): string {
   const pe = config.prompt_env
   if (!pe) return text
 
   let result = text
 
-  // 1. Billing header fingerprint
-  result = result.replace(
-    /cc_version=[\d.]+\.[a-f0-9]{3}/g,
-    `cc_version=${config.env.version}.000`,
-  )
+  // 1. Billing header fingerprint (only when hash is available)
+  if (hash !== null) {
+    result = result.replace(
+      /cc_version=[\d.]+\.[a-f0-9]{3}/g,
+      `cc_version=${config.env.version}.${hash}`,
+    )
+  }
 
-  // 2. <env> block format (older prompt format):
-  //    Platform: linux
-  //    Shell: bash
-  //    OS Version: Linux 6.5.0-xxx
-  //    Working directory: /home/bob/project
+  // 2. <env> block format:
+  //    Platform: linux → Platform: darwin
+  //    Shell: bash → Shell: zsh
+  //    OS Version: Linux 6.5.0-xxx → OS Version: Darwin 24.4.0
   result = result.replace(
     /Platform:\s*\S+/g,
     `Platform: ${pe.platform}`,
@@ -118,21 +176,32 @@ function rewritePromptText(text: string, config: Config): string {
   )
 
   // 3. Working directory / Primary working directory
-  //    Matches: "Working directory: /any/path" or "Primary working directory: /any/path"
   result = result.replace(
     /((?:Primary )?[Ww]orking directory:\s*)\/\S+/g,
     `$1${pe.working_dir}`,
   )
 
-  // 4. Home directory paths: /Users/xxx/, /home/xxx/, C:\Users\xxx\
-  //    Replace with canonical home path to prevent username leakage
-  //    Only replace the home prefix, keep the rest of the path
+  // 4. Home directory paths: /Users/xxx/, /home/xxx/
   result = result.replace(
     /\/(?:Users|home)\/[^/\s]+\//g,
     `${pe.working_dir.match(/^\/[^/]+\/[^/]+\//)?.[0] || '/Users/user/'}`,
   )
 
   return result
+}
+
+/**
+ * Rewrite only <system-reminder> blocks within message text.
+ * These are injected by Claude Code (env info, git status, etc.) — not user-authored.
+ * User-written text outside these tags is left untouched to preserve intent.
+ */
+function rewriteSystemReminders(text: string, config: Config): string {
+  return text.replace(
+    /(<system-reminder>)([\s\S]*?)(<\/system-reminder>)/g,
+    (_match, open, content, close) => {
+      return open + rewritePromptText(content, config, null) + close
+    },
+  )
 }
 
 /**
@@ -161,10 +230,8 @@ function rewriteEventBatch(body: any, config: Config) {
     }
 
     // Strip fields that leak gateway URL or proxy usage
-    // logging.ts:143 adds baseUrl = ANTHROPIC_BASE_URL to every api event
     delete data.baseUrl
     delete data.base_url
-    // detectGateway() adds gateway type if base URL matches known providers
     delete data.gateway
 
     // Additional metadata - rewrite base64-encoded blob if present
@@ -182,10 +249,6 @@ function rewriteGenericIdentity(body: any, config: Config) {
   if (body.email) body.email = config.identity.email
 }
 
-/**
- * Build canonical env object from config.
- * Merges config env values into the expected structure.
- */
 function buildCanonicalEnv(config: Config): Record<string, unknown> {
   return {
     platform: config.env.platform,
@@ -212,12 +275,7 @@ function buildCanonicalEnv(config: Config): Record<string, unknown> {
   }
 }
 
-/**
- * Generate realistic process metrics.
- * Keeps uptime from the real event but normalizes hardware-identifying fields.
- */
 function buildCanonicalProcess(original: any, config: Config): any {
-  // If it's a base64 string, decode → rewrite → re-encode
   if (typeof original === 'string') {
     try {
       const decoded = JSON.parse(Buffer.from(original, 'base64').toString('utf-8'))
@@ -227,12 +285,9 @@ function buildCanonicalProcess(original: any, config: Config): any {
       return original
     }
   }
-
-  // If it's already an object
   if (typeof original === 'object') {
     return rewriteProcessFields(original, config)
   }
-
   return original
 }
 
@@ -244,15 +299,12 @@ function rewriteProcessFields(proc: any, config: Config): any {
     rss: randomInRange(rss_range[0], rss_range[1]),
     heapTotal: randomInRange(heap_total_range[0], heap_total_range[1]),
     heapUsed: randomInRange(heap_used_range[0], heap_used_range[1]),
-    // Keep uptime and cpuUsage as-is (these vary naturally)
   }
 }
 
 function rewriteAdditionalMetadata(original: string, config: Config): string {
   try {
     const decoded = JSON.parse(Buffer.from(original, 'base64').toString('utf-8'))
-    // rh (repo hash) is fine to keep - users work on different repos naturally
-    // Strip fields that leak gateway URL
     delete decoded.baseUrl
     delete decoded.base_url
     delete decoded.gateway
@@ -268,6 +320,7 @@ function randomInRange(min: number, max: number): number {
 
 /**
  * Rewrite HTTP headers to canonical identity.
+ * Uses the hash computed during body rewriting (getCurrentHash).
  */
 export function rewriteHeaders(
   headers: Record<string, string | string[] | undefined>,
@@ -281,16 +334,16 @@ export function rewriteHeaders(
     const lower = key.toLowerCase()
 
     // Skip hop-by-hop headers and auth (gateway injects the real OAuth token)
-    if (['host', 'connection', 'proxy-authorization', 'proxy-connection', 'transfer-encoding', 'authorization'].includes(lower)) {
+    if (['host', 'connection', 'proxy-authorization', 'proxy-connection', 'transfer-encoding', 'authorization', 'x-api-key'].includes(lower)) {
       continue
     }
 
     if (lower === 'user-agent') {
-      // Normalize to canonical version
       out[key] = `claude-code/${config.env.version} (external, cli)`
     } else if (lower === 'x-anthropic-billing-header') {
-      // Rewrite billing header
-      out[key] = v.replace(/cc_version=[\d.]+\.[a-f0-9]{3}/g, `cc_version=${config.env.version}.000`)
+      // Strip billing header entirely — consistent with CLAUDE_CODE_ATTRIBUTION_HEADER=false
+      // This also maximizes cross-session prompt cache sharing
+      continue
     } else {
       out[key] = v
     }

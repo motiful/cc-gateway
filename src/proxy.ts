@@ -8,6 +8,7 @@ import { authenticate, initAuth } from './auth.js'
 import { getAccessToken } from './oauth.js'
 import { rewriteBody, rewriteHeaders } from './rewriter.js'
 import { audit, log } from './logger.js'
+import { getProxyAgent } from './proxy-agent.js'
 
 export function startProxy(config: Config) {
   initAuth(config)
@@ -49,6 +50,9 @@ async function handleRequest(
 ) {
   const method = req.method || 'GET'
   const path = req.url || '/'
+  const clientIp = req.socket.remoteAddress || 'unknown'
+
+  log('info', `← ${method} ${path} from ${clientIp}`)
 
   // Health check - no auth required
   if (path === '/_health') {
@@ -84,10 +88,12 @@ async function handleRequest(
   const clientName = authenticate(req)
   if (!clientName) {
     res.writeHead(401, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Unauthorized - provide Bearer token in Authorization or Proxy-Authorization header' }))
+    res.end(JSON.stringify({ error: 'Unauthorized - provide client token via x-api-key header' }))
     log('warn', `Unauthorized request: ${method} ${path}`)
     return
   }
+
+  log('info', `Client "${clientName}" → ${method} ${path}`)
 
   // Get the real OAuth token (managed by gateway)
   const oauthToken = getAccessToken()
@@ -120,12 +126,14 @@ async function handleRequest(
     config,
   )
 
-  // Inject the real OAuth token (replaces whatever the client sent)
-  rewrittenHeaders['authorization'] = `Bearer ${oauthToken}`
+  // Inject the real OAuth token via x-api-key (Anthropic uses this header for both
+  // API keys and OAuth tokens, distinguished by prefix: sk-ant-api03- vs sk-ant-oat01-)
+  rewrittenHeaders['x-api-key'] = oauthToken
 
   // Forward to upstream
   const upstreamUrl = new URL(path, upstream)
 
+  const agent = getProxyAgent()
   const proxyReq = httpsRequest(
     upstreamUrl,
     {
@@ -135,6 +143,7 @@ async function handleRequest(
         host: upstream.host,
         'content-length': String(body.length),
       },
+      ...(agent && { agent }),
     },
     (proxyRes) => {
       const status = proxyRes.statusCode || 502
@@ -203,13 +212,15 @@ function buildVerificationPayload(config: Config) {
     _info: 'This shows how the gateway rewrites a sample request',
     before: {
       'metadata.user_id': JSON.parse(sampleInput.metadata.user_id),
-      system_prompt_env: sampleInput.system[1].text,
       billing_header: sampleInput.system[0].text,
+      system_prompt_env: sampleInput.system[1].text,
+      system_block_count: sampleInput.system.length,
     },
     after: {
       'metadata.user_id': JSON.parse(rewritten.metadata.user_id),
-      system_prompt_env: rewritten.system[1].text,
-      billing_header: rewritten.system[0].text,
+      billing_header: '(stripped)',
+      system_prompt_env: rewritten.system[0]?.text ?? '(empty)',
+      system_block_count: rewritten.system.length,
     },
   }
 }

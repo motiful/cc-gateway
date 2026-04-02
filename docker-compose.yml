@@ -7,6 +7,11 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./certs:/app/certs:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8443/_health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     logging:
       driver: json-file
       options:

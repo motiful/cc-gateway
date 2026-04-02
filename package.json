@@ -1,6 +1,6 @@
 {
   "name": "cc-gateway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI API identity gateway — reverse proxy that normalizes device fingerprints and telemetry for privacy-preserving API proxying",
   "license": "MIT",
   "type": "module",
@@ -14,6 +14,7 @@
     "test": "tsx tests/rewriter.test.ts"
   },
   "dependencies": {
+    "https-proxy-agent": "^9.0.0",
     "yaml": "^2.7.0"
   },
   "devDependencies": {

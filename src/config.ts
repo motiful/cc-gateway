@@ -22,7 +22,9 @@ export type Config = {
     tokens: TokenEntry[]
   }
   oauth: {
+    access_token?: string
     refresh_token: string
+    expires_at?: number
   }
   identity: {
     device_id: string

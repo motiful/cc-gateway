@@ -15,6 +15,14 @@ export function initAuth(config: Config) {
  * Returns the token entry name (for audit logging) or null if unauthorized.
  */
 export function authenticate(req: IncomingMessage): string | null {
+  // CC with ANTHROPIC_API_KEY sends x-api-key header
+  const apiKey = req.headers['x-api-key']
+  if (apiKey && typeof apiKey === 'string') {
+    const entry = tokenMap.get(apiKey)
+    if (entry) return entry.name
+  }
+
+  // Fallback: Bearer token in Authorization or Proxy-Authorization
   const authHeader = req.headers['proxy-authorization'] || req.headers['authorization']
   if (!authHeader || typeof authHeader !== 'string') return null
 

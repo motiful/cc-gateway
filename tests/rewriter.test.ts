@@ -113,16 +113,32 @@ test('rewrites working directory path', () => {
   assert.ok(!result.system.includes('/home/bob/'), 'Original path should be replaced')
 })
 
-test('rewrites billing header fingerprint', () => {
+test('strips billing header from system prompt (string format)', () => {
   const body = {
-    system: 'cc_version=2.1.81.a1b; cc_entrypoint=cli;',
+    system: 'x-anthropic-billing-header: cc_version=2.1.81.a1b; cc_entrypoint=cli; cch=00000;\nOther content here.',
     messages: [],
   }
   const result = JSON.parse(
     rewriteBody(Buffer.from(JSON.stringify(body)), '/v1/messages', config).toString(),
   )
-  assert.ok(result.system.includes('cc_version=2.1.81.000'))
-  assert.ok(!result.system.includes('.a1b'))
+  assert.ok(!result.system.includes('billing-header'), 'Billing header should be stripped')
+  assert.ok(!result.system.includes('cc_version'), 'cc_version should be stripped')
+  assert.ok(result.system.includes('Other content'), 'Non-billing content should remain')
+})
+
+test('strips billing header from system prompt (array format)', () => {
+  const body = {
+    system: [
+      { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.81.a1b; cc_entrypoint=cli;' },
+      { type: 'text', text: 'Platform: linux\nShell: bash' },
+    ],
+    messages: [],
+  }
+  const result = JSON.parse(
+    rewriteBody(Buffer.from(JSON.stringify(body)), '/v1/messages', config).toString(),
+  )
+  assert.equal(result.system.length, 1, 'Billing header block should be removed')
+  assert.ok(result.system[0].text.includes('Platform: darwin'), 'Remaining block should be rewritten')
 })
 
 test('rewrites home paths in user messages with system-reminder', () => {
@@ -267,6 +283,23 @@ test('strips proxy-authorization header', () => {
     config,
   )
   assert.equal(headers['proxy-authorization'], undefined)
+})
+
+test('strips x-api-key header (gateway injects real token)', () => {
+  const headers = rewriteHeaders(
+    { 'x-api-key': 'client-gateway-token', 'x-app': 'cli' },
+    config,
+  )
+  assert.equal(headers['x-api-key'], undefined)
+  assert.equal(headers['x-app'], 'cli')
+})
+
+test('strips x-anthropic-billing-header', () => {
+  const headers = rewriteHeaders(
+    { 'x-anthropic-billing-header': 'cc_version=2.1.81.a1b; cc_entrypoint=cli;' },
+    config,
+  )
+  assert.equal(headers['x-anthropic-billing-header'], undefined)
 })
 
 // ============================================================

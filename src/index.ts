@@ -11,8 +11,8 @@ try {
 
   log('info', 'CC Gateway starting...')
 
-  // Initialize OAuth first - gateway manages the token lifecycle
-  await initOAuth(config.oauth.refresh_token)
+  // Initialize OAuth — uses existing access token if valid, only refreshes when expired
+  await initOAuth(config.oauth)
 
   startProxy(config)
 } catch (err) {

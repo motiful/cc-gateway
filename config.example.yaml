@@ -1,29 +1,29 @@
 # CC Gateway Configuration
-# Copy to config.yaml and modify
+# Copy to config.yaml and modify, or use: bash scripts/quick-setup.sh
 
 server:
   port: 8443
-  # TLS cert/key paths (required for HTTPS)
+  # TLS cert/key paths (required for remote deployment, not needed for localhost)
   # Generate self-signed: openssl req -x509 -newkey rsa:2048 -keyout certs/key.pem -out certs/cert.pem -days 365 -nodes
-  tls:
-    cert: ./certs/cert.pem
-    key: ./certs/key.pem
+  # tls:
+  #   cert: ./certs/cert.pem
+  #   key: ./certs/key.pem
 
 # Upstream Anthropic API
 upstream:
   url: https://api.anthropic.com
 
 # OAuth - gateway manages token lifecycle centrally
-# Step 1: On admin machine, run `claude` and do browser OAuth login
-# Step 2: Copy refresh_token from one of these locations:
-#   macOS Keychain: security find-generic-password -s "~/.claude-credentials" -w | jq -r '.claudeAiOauth.refreshToken'
-#   Fallback file:  cat ~/.claude/.credentials.json | jq -r '.claudeAiOauth.refreshToken'
-# Step 3: Paste it here. Gateway auto-refreshes the access token.
+# Extract credentials from macOS Keychain:
+#   security find-generic-password -a "$USER" -s "Claude Code-credentials" -w | python3 -c "import sys,json; d=json.load(sys.stdin)['claudeAiOauth']; print(f'access_token: {d[\"accessToken\"]}\nrefresh_token: {d[\"refreshToken\"]}\nexpires_at: {d[\"expiresAt\"]}')"
+# Or just run: bash scripts/quick-setup.sh (extracts automatically)
 oauth:
+  access_token: "your-access-token-here"
   refresh_token: "your-refresh-token-here"
+  expires_at: 0
 
-# Authentication - each client gets a bearer token
-# Generate tokens: npm run generate-token
+# Authentication - each client gets a unique token
+# Generate tokens: bash scripts/add-client.sh <name>
 auth:
   tokens:
     - name: machine-a
