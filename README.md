@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/motiful-cc-gateway-badge.png)](https://mseep.ai/app/motiful-cc-gateway)
+
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset=".github/logo-dark.svg">
