@@ -11,8 +11,9 @@ try {
 
   log('info', 'CC Gateway starting...')
 
-  // Initialize OAuth — uses existing access token if valid, only refreshes when expired
-  await initOAuth(config.oauth)
+  // Initialize OAuth — uses existing access token if valid, only refreshes when expired.
+  // Pass configPath so rotated tokens can be persisted back to config.yaml.
+  await initOAuth(config.oauth, configPath)
 
   startProxy(config)
 } catch (err) {

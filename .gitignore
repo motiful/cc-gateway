@@ -5,3 +5,7 @@ dist/
 config.yaml
 certs/
 clients/
+config.yaml.bak.*
+config.yaml.predeploy.*
+*.bak.*
+dist.bak.*/
