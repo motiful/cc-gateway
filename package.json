@@ -11,7 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "generate-token": "tsx src/scripts/generate-token.ts",
     "generate-identity": "tsx src/scripts/generate-identity.ts",
-    "test": "tsx tests/rewriter.test.ts"
+    "test": "npm run build"
   },
   "dependencies": {
     "https-proxy-agent": "^9.0.0",

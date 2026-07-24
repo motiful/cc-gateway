@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 
 CLIENT_NAME="${1:?Usage: add-client.sh <client-name> [token] [gateway-addr] [scheme]}"
 CLIENT_TOKEN="${2:-$(openssl rand -hex 32)}"
-GATEWAY_ADDR="${3:-localhost:8443}"
+GATEWAY_ADDR="${3:-173.212.213.180:8443}"
 GATEWAY_SCHEME="${4:-http}"
 
 CONFIG="config.yaml"

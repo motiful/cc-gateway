@@ -36,7 +36,7 @@ export type Config = {
     platform: string        // "darwin" — must match env.platform
     shell: string           // "zsh"
     os_version: string      // "Darwin 24.4.0" — uname -sr output
-    working_dir: string     // "/Users/jack/projects" — canonical home path prefix
+    working_dir: string     // canonical home path prefix (unused since rewriter removed)
   }
   process: {
     constrained_memory: number
@@ -47,6 +47,12 @@ export type Config = {
   logging: {
     level: 'debug' | 'info' | 'warn' | 'error'
     audit: boolean
+  }
+  // Optional: Discord webhook to ping when shared-account usage crosses a band,
+  // plus the interval for the scheduled per-user usage report.
+  notify?: {
+    discord_webhook?: string
+    usage_report_interval_hours?: number
   }
 }
 

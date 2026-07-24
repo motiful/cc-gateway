@@ -6,9 +6,43 @@ import { URL } from 'url'
 import type { Config } from './config.js'
 import { authenticate, initAuth } from './auth.js'
 import { getAccessToken } from './oauth.js'
-import { rewriteBody, rewriteHeaders } from './rewriter.js'
 import { audit, log } from './logger.js'
 import { getProxyAgent } from './proxy-agent.js'
+import { maybeNotifyUsage } from './usage-notify.js'
+import { attachUsage, recordRequest } from './usage-meter.js'
+
+// Headers that must NOT be forwarded upstream: hop-by-hop framing headers and
+// the client's own auth (the gateway injects the real OAuth token below).
+// Everything else passes through unchanged — this gateway is an OAuth-swap
+// passthrough, no identity/env/path masking.
+const STRIP_HEADERS = new Set([
+  'host',
+  'connection',
+  'keep-alive',
+  'upgrade',
+  'proxy-authorization',
+  'proxy-connection',
+  'transfer-encoding',
+  'content-length',
+  'authorization',
+  'x-api-key',
+])
+
+/**
+ * Copy client request headers through unchanged, dropping only hop-by-hop
+ * framing headers and the client's auth. No User-Agent / identity rewriting.
+ */
+function sanitizeHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(headers)) {
+    if (!value) continue
+    if (STRIP_HEADERS.has(key.toLowerCase())) continue
+    out[key] = Array.isArray(value) ? value.join(', ') : value
+  }
+  return out
+}
 
 export function startProxy(config: Config) {
   initAuth(config)
@@ -16,8 +50,30 @@ export function startProxy(config: Config) {
   const upstream = new URL(config.upstream.url)
   const useTls = config.server.tls?.cert && config.server.tls?.key
 
+  // Client aborts (Ctrl+C, timeout, disconnect) surface as an 'error' event
+  // on req/res or a rejection from handleRequest (e.g. the `for await` body
+  // read throwing "aborted"). Left unhandled, either one crashes the whole
+  // process and drops every other client's in-flight requests. Log and move
+  // on instead.
   const handler = (req: IncomingMessage, res: ServerResponse) => {
-    handleRequest(req, res, config, upstream)
+    req.on('error', (err) => {
+      log('warn', `Client request error: ${err.message}`)
+    })
+    res.on('error', (err) => {
+      log('warn', `Client response error: ${err.message}`)
+    })
+
+    handleRequest(req, res, config, upstream).catch((err) => {
+      log('error', `Unhandled error in handleRequest: ${err instanceof Error ? err.message : err}`)
+      if (!res.headersSent) {
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Internal gateway error' }))
+        } catch {
+          // response socket is already gone; nothing to do
+        }
+      }
+    })
   }
 
   let server
@@ -35,7 +91,7 @@ export function startProxy(config: Config) {
   server.listen(config.server.port, () => {
     log('info', `CC Gateway listening on ${useTls ? 'https' : 'http'}://0.0.0.0:${config.server.port}`)
     log('info', `Upstream: ${config.upstream.url}`)
-    log('info', `Canonical device_id: ${config.identity.device_id.slice(0, 8)}...`)
+    log('info', `Mode: OAuth-swap passthrough (no identity/env masking)`)
     log('info', `Authorized clients: ${config.auth.tokens.map(t => t.name).join(', ')}`)
   })
 
@@ -62,15 +118,14 @@ async function handleRequest(
     res.end(JSON.stringify({
       status: oauthOk ? 'ok' : 'degraded',
       oauth: oauthOk ? 'valid' : 'expired/refreshing',
-      canonical_device: config.identity.device_id.slice(0, 8) + '...',
-      canonical_platform: config.env.platform,
+      mode: 'oauth-swap-passthrough',
       upstream: config.upstream.url,
       clients: config.auth.tokens.map(t => t.name),
     }))
     return
   }
 
-  // Dry-run verification - shows what would be rewritten (auth required)
+  // Dry-run verification - shows gateway behavior (auth required)
   if (path === '/_verify') {
     const clientName = authenticate(req)
     if (!clientName) {
@@ -109,26 +164,21 @@ async function handleRequest(
   for await (const chunk of req) {
     chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
   }
-  let body = Buffer.concat(chunks)
+  const body = Buffer.concat(chunks)
 
-  // Rewrite identity fields in body
-  if (body.length > 0) {
-    try {
-      body = rewriteBody(body, path, config) as Buffer<ArrayBuffer>
-    } catch (err) {
-      log('error', `Body rewrite failed for ${path}: ${err}`)
-    }
-  }
-
-  // Rewrite headers (strips client auth, normalizes identity headers)
-  const rewrittenHeaders = rewriteHeaders(
+  // OAuth-swap passthrough: forward the body unchanged (no identity/env masking).
+  // Only strip hop-by-hop + client-auth headers; everything else passes through.
+  const forwardHeaders = sanitizeHeaders(
     req.headers as Record<string, string | string[] | undefined>,
-    config,
   )
 
-  // Inject the real OAuth token via x-api-key (Anthropic uses this header for both
-  // API keys and OAuth tokens, distinguished by prefix: sk-ant-api03- vs sk-ant-oat01-)
-  rewrittenHeaders['x-api-key'] = oauthToken
+  // OAuth tokens (sk-ant-oat01-) need Authorization: Bearer; API keys (sk-ant-api03-) use x-api-key
+  if (oauthToken.startsWith("sk-ant-oat01-")) {
+    delete forwardHeaders["x-api-key"]
+    forwardHeaders["authorization"] = "Bearer " + oauthToken
+  } else {
+    forwardHeaders["x-api-key"] = oauthToken
+  }
 
   // Forward to upstream
   const upstreamUrl = new URL(path, upstream)
@@ -139,7 +189,7 @@ async function handleRequest(
     {
       method,
       headers: {
-        ...rewrittenHeaders,
+        ...forwardHeaders,
         host: upstream.host,
         'content-length': String(body.length),
       },
@@ -156,6 +206,14 @@ async function handleRequest(
       // Stream response directly (SSE for Claude responses)
       proxyRes.pipe(res)
 
+      // Attribute this response's token usage to the client (non-destructive
+      // tap — must be attached right after pipe() so no chunks are missed).
+      attachUsage(clientName, proxyRes)
+      recordRequest(clientName, status)
+
+      // Watch the shared account's usage headers and ping Discord on 5% bands.
+      maybeNotifyUsage(proxyRes.headers)
+
       if (config.logging.audit) {
         audit(clientName, method, path, status)
       }
@@ -168,6 +226,7 @@ async function handleRequest(
       res.writeHead(502, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Bad gateway', detail: err.message }))
     }
+    recordRequest(clientName, 502)
     if (config.logging.audit) {
       audit(clientName, method, path, 502)
     }
@@ -178,49 +237,20 @@ async function handleRequest(
 }
 
 /**
- * Build a sample payload showing what the rewriter produces.
- * Used by /_verify endpoint for admin validation.
+ * Describe gateway behavior for the /_verify endpoint.
+ * The gateway is an OAuth-swap passthrough: request bodies and headers are
+ * forwarded unchanged; only the client token is swapped for the shared OAuth
+ * token and hop-by-hop/auth headers are stripped.
  */
 function buildVerificationPayload(config: Config) {
-  // Simulate a /v1/messages request body
-  const sampleInput = {
-    metadata: {
-      user_id: JSON.stringify({
-        device_id: 'REAL_DEVICE_ID_FROM_CLIENT_abc123',
-        account_uuid: 'shared-account-uuid',
-        session_id: 'session-xxx',
-      }),
-    },
-    system: [
-      {
-        type: 'text',
-        text: `x-anthropic-billing-header: cc_version=2.1.81.a1b; cc_entrypoint=cli;`,
-      },
-      {
-        type: 'text',
-        text: `Here is useful information about the environment:\n<env>\nWorking directory: /home/bob/myproject\nPlatform: linux\nShell: bash\nOS Version: Linux 6.5.0-generic\n</env>`,
-      },
-    ],
-    messages: [{ role: 'user', content: 'hello' }],
-  }
-
-  const rewritten = JSON.parse(
-    rewriteBody(Buffer.from(JSON.stringify(sampleInput)), '/v1/messages', config).toString('utf-8'),
-  )
-
   return {
-    _info: 'This shows how the gateway rewrites a sample request',
-    before: {
-      'metadata.user_id': JSON.parse(sampleInput.metadata.user_id),
-      billing_header: sampleInput.system[0].text,
-      system_prompt_env: sampleInput.system[1].text,
-      system_block_count: sampleInput.system.length,
+    _info: 'OAuth-swap passthrough gateway',
+    behavior: {
+      body: 'forwarded unchanged (no identity/env/path masking)',
+      headers_stripped: Array.from(STRIP_HEADERS),
+      auth: 'client token swapped for shared OAuth token (Authorization: Bearer)',
     },
-    after: {
-      'metadata.user_id': JSON.parse(rewritten.metadata.user_id),
-      billing_header: '(stripped)',
-      system_prompt_env: rewritten.system[0]?.text ?? '(empty)',
-      system_block_count: rewritten.system.length,
-    },
+    upstream: config.upstream.url,
+    clients: config.auth.tokens.map(t => t.name),
   }
 }
