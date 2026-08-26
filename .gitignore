@@ -5,3 +5,4 @@ dist/
 config.yaml
 certs/
 clients/
+.omc/

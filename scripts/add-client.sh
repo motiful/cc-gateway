@@ -31,7 +31,7 @@ with open('$CONFIG', 'w') as f:
     echo "  - name: ${CLIENT_NAME}"
     echo "    token: ${CLIENT_TOKEN}"
   }
-  echo "✓ Token added to config.yaml (restart gateway to pick up)"
+  echo "✓ Token added to config.yaml (gateway will hot-reload within ~2s)"
 fi
 
 # Generate the launcher script
@@ -64,7 +64,18 @@ fi
 
 cat >> "$LAUNCHER" <<'SCRIPT_BODY'
 
-INSTALL_PATH="/usr/local/bin/ccg"
+# Pick a writable install dir. Apple Silicon Macs ship without /usr/local/bin
+# by default; Intel Macs and most Linux distros have it. Fall back to
+# ~/.local/bin so install always works without sudo as a last resort.
+if [[ -d /opt/homebrew/bin ]]; then
+  INSTALL_DIR="/opt/homebrew/bin"
+elif [[ -d /usr/local/bin ]]; then
+  INSTALL_DIR="/usr/local/bin"
+else
+  INSTALL_DIR="$HOME/.local/bin"
+  mkdir -p "$INSTALL_DIR"
+fi
+INSTALL_PATH="$INSTALL_DIR/ccg"
 SELF_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 # Detect shell RC file
 case "$SHELL" in
@@ -75,13 +86,68 @@ case "$SHELL" in
 esac
 ALIAS_TAG="# cc-gateway alias"
 
+# Pre-approve this token in ~/.claude.json so Claude Code never shows the
+# "Detected a custom API key ... Do you want to use this API key?" prompt.
+# Claude Code records approval as the key's last 20 characters.
+approve_token() {
+  CLAUDE_JSON="$HOME/.claude.json"
+  KEY_TAIL="${CLIENT_TOKEN: -20}"
+  [[ ${#CLIENT_TOKEN} -lt 20 ]] && return 0
+  if command -v node >/dev/null 2>&1; then
+    node -e 'const fs=require("fs");const[p,t]=process.argv.slice(1);let j={};try{j=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){};if(typeof j!=="object"||j===null||Array.isArray(j))j={};const r=j.customApiKeyResponses=j.customApiKeyResponses||{};const a=r.approved=Array.isArray(r.approved)?r.approved:[];if(!a.includes(t)){a.push(t);fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n")}' "$CLAUDE_JSON" "$KEY_TAIL" 2>/dev/null && return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys
+p,t=sys.argv[1],sys.argv[2]
+try:
+    j=json.load(open(p))
+except Exception:
+    j={}
+if not isinstance(j,dict): j={}
+r=j.setdefault("customApiKeyResponses",{})
+if not isinstance(r,dict):
+    r={}; j["customApiKeyResponses"]=r
+a=r.setdefault("approved",[])
+if not isinstance(a,list):
+    a=[]; r["approved"]=a
+if t not in a:
+    a.append(t)
+    open(p,"w").write(json.dumps(j,indent=2)+"\n")' "$CLAUDE_JSON" "$KEY_TAIL" 2>/dev/null
+  fi
+  return 0
+}
+
 # ── Subcommands ──
 
 case "$1" in
   install)
-    cp "$0" "$INSTALL_PATH" 2>/dev/null || sudo cp "$0" "$INSTALL_PATH"
-    chmod +x "$INSTALL_PATH"
-    echo "Installed as 'ccg'."
+    if cp "$0" "$INSTALL_PATH" 2>/dev/null; then :; else
+      sudo cp "$0" "$INSTALL_PATH" || { echo "Install failed: cannot write to $INSTALL_PATH"; exit 1; }
+    fi
+    chmod +x "$INSTALL_PATH" 2>/dev/null || sudo chmod +x "$INSTALL_PATH"
+    echo "Installed as 'ccg' at $INSTALL_PATH."
+    # Overwrite stale ccg copies from earlier installs (possibly pointing at
+    # another gateway) so this launcher wins regardless of PATH order.
+    for d in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
+      OTHER="$d/ccg"
+      if [[ "$OTHER" != "$INSTALL_PATH" && -f "$OTHER" ]]; then
+        if cp "$0" "$OTHER" 2>/dev/null; then
+          echo "Updated stale ccg at $OTHER."
+        else
+          echo "Warning: stale ccg at $OTHER could not be updated and may shadow this one."
+          echo "  Remove it with: sudo rm $OTHER"
+        fi
+      fi
+    done
+    case ":$PATH:" in
+      *":$INSTALL_DIR:"*) ;;
+      *)
+        echo ""
+        echo "Note: $INSTALL_DIR is not on your PATH."
+        echo "  Add this line to $RC_FILE and reopen your terminal:"
+        echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
+        ;;
+    esac
     echo ""
     echo "  ccg              Start Claude Code through gateway"
     echo "  ccg hijack       Make 'claude' also go through gateway"
@@ -190,6 +256,9 @@ export ANTHROPIC_API_KEY="$CLIENT_TOKEN"
 export ANTHROPIC_BASE_URL="$GATEWAY_URL"
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export CLAUDE_CODE_ATTRIBUTION_HEADER=false
+
+# Skip the one-time "use this API key?" confirmation for this token.
+approve_token
 
 # Check gateway is reachable
 HEALTH=$(curl -sk --max-time 3 "${GATEWAY_URL}/_health" 2>/dev/null)

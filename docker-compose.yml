@@ -1,12 +1,23 @@
 services:
   gateway:
     build: .
-    ports:
-      - "8443:8443"
+    # Coolify auto-generates SERVICE_FQDN_GATEWAY from the domain configured
+    # in the service UI. Set the domain there (e.g. ccg.example.com) and
+    # Coolify will substitute it into the labels below at deploy time.
+    environment:
+      - SERVICE_FQDN_GATEWAY=/
+    expose:
+      - "8443"
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      - ./certs:/app/certs:ro
+      # ccg_data persists both the SQLite DB and the auto-generated config.yaml
+      # (so device_id + tokens survive restarts/redeploys).
+      - ccg_data:/app/data
+      # Host's claude login credentials — read on first start to bootstrap
+      # config.yaml automatically. Read-only so the container cannot tamper.
+      - /root/.claude/.credentials.json:/app/data/claude-credentials.json:ro
     restart: unless-stopped
+    networks:
+      - coolify
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:8443/_health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -17,3 +28,25 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=coolify"
+      - "traefik.http.services.ccg.loadbalancer.server.port=8443"
+      # HTTPS router — Coolify substitutes SERVICE_FQDN_GATEWAY at deploy time
+      - "traefik.http.routers.ccg.rule=Host(`${SERVICE_FQDN_GATEWAY}`)"
+      - "traefik.http.routers.ccg.entrypoints=https"
+      - "traefik.http.routers.ccg.tls=true"
+      - "traefik.http.routers.ccg.tls.certresolver=letsencrypt"
+      # HTTP → HTTPS redirect
+      - "traefik.http.routers.ccg-http.rule=Host(`${SERVICE_FQDN_GATEWAY}`)"
+      - "traefik.http.routers.ccg-http.entrypoints=http"
+      - "traefik.http.routers.ccg-http.middlewares=ccg-redirect"
+      - "traefik.http.middlewares.ccg-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.ccg-redirect.redirectscheme.permanent=true"
+
+networks:
+  coolify:
+    external: true
+
+volumes:
+  ccg_data:

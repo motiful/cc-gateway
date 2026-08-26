@@ -11,13 +11,21 @@
     "dev": "tsx watch src/index.ts",
     "generate-token": "tsx src/scripts/generate-token.ts",
     "generate-identity": "tsx src/scripts/generate-identity.ts",
-    "test": "tsx tests/rewriter.test.ts"
+    "add-user": "node dist/scripts/add-user.js",
+    "add-user:dev": "tsx src/scripts/add-user.ts",
+    "update-version": "node dist/scripts/update-version.js",
+    "update-version:dev": "tsx src/scripts/update-version.ts",
+    "set-workdir": "node dist/scripts/set-workdir.js",
+    "set-workdir:dev": "tsx src/scripts/set-workdir.ts",
+    "test": "tsx tests/rewriter.test.ts && tsx tests/preview.test.ts && tsx tests/ratelimit.test.ts && tsx tests/pricing.test.ts"
   },
   "dependencies": {
+    "better-sqlite3": "^11.5.0",
     "https-proxy-agent": "^9.0.0",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"

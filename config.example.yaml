@@ -63,7 +63,12 @@ prompt_env:
   platform: darwin                    # Must match env.platform
   shell: zsh                          # Shell name shown in prompt
   os_version: "Darwin 24.4.0"        # uname -sr output
-  working_dir: /Users/jack/projects   # Canonical home directory path prefix
+  working_dir: /Users/dev/projects    # Canonical home directory path prefix
+  # The gateway masks the real cwd/home paths to working_dir in the request, then
+  # reverses them back in the model's response so bash/file tool calls still hit
+  # the real paths. Set false to disable the response un-masking (paths stay fake
+  # in tool calls and `cd` will fail on the real machine).
+  reverse_paths: true
 
 # Canonical process metrics (should look like a real machine)
 process:
@@ -76,3 +81,9 @@ process:
 logging:
   level: info  # debug | info | warn | error
   audit: true  # log which client made each request
+
+# SQLite database — stores dashboard users and request metrics.
+# Path is relative to working directory. In Docker, mount /app/data as a volume
+# so the DB survives restarts. Create dashboard users with: npm run add-user <name>
+db:
+  path: ./data/ccg.db
